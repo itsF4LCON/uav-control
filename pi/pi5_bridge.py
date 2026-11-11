@@ -12,6 +12,7 @@ from drone.flight import (
     get_loiter_radius,
     consume_launch_request,
     is_land_requested,
+    is_kill_requested,
     clear_land_request,
 )
 from godot_bridge import GodotBridge
@@ -86,10 +87,39 @@ class MavlinkHardwareInterface:
         self.surfaces = [0.0, 0.0, 0.0, 0.0]
         self._home_lat_lon_alt = None
 
-    def reset_home_here(self):
-        self._home_lat_lon_alt = None
+    def set_flight_mode(self, mode_name=None):
+        mode = str(mode_name or getattr(C, "PIXHAWK_MODE", "GUIDED")).upper()
+        try:
+            mapping = self.conn.mode_mapping()
+            if mapping and mode in mapping:
+                self.conn.set_mode(mapping[mode])
+        except Exception:
+            pass
+
+    def arm_disarm(self, arm, force=False):
+        try:
+            self.conn.mav.command_long_send(
+                self.conn.target_system,
+                self.conn.target_component,
+                self.mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+                0,
+                1.0 if arm else 0.0,
+                21196.0 if (not arm and force) else 0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            )
+        except Exception:
+            pass
 
     def poll_state(self):
+        ch_ail = int(getattr(C, "SERVO_AIL", 1))
+        ch_elv = int(getattr(C, "SERVO_ELV", 2))
+        ch_thr = int(getattr(C, "SERVO_THR", 3))
+        ch_rud = int(getattr(C, "SERVO_RUD", 4))
+
         while True:
             msg = self.conn.recv_match(
                 type=[
@@ -130,10 +160,14 @@ class MavlinkHardwareInterface:
                 self.airspeed = max(va, 0.0)
                 self.surfaces[0] = float(np.clip(msg.throttle / 100.0, 0.0, 1.0))
             elif mtype == "SERVO_OUTPUT_RAW":
-                self.surfaces[1] = float(np.clip((msg.servo1_raw - 1500.0) / 500.0, -1.0, 1.0))
-                self.surfaces[2] = float(np.clip((msg.servo2_raw - 1500.0) / 500.0, -1.0, 1.0))
-                self.surfaces[0] = float(np.clip((msg.servo3_raw - 1000.0) / 1000.0, 0.0, 1.0))
-                self.surfaces[3] = float(np.clip((msg.servo4_raw - 1500.0) / 500.0, -1.0, 1.0))
+                pwm_ail = float(getattr(msg, f"servo{ch_ail}_raw", 1500.0))
+                pwm_elv = float(getattr(msg, f"servo{ch_elv}_raw", 1500.0))
+                pwm_thr = float(getattr(msg, f"servo{ch_thr}_raw", 1000.0))
+                pwm_rud = float(getattr(msg, f"servo{ch_rud}_raw", 1500.0))
+                self.surfaces[1] = float(np.clip((pwm_ail - 1500.0) / 500.0, -1.0, 1.0))
+                self.surfaces[2] = float(np.clip((pwm_elv - 1500.0) / 500.0, -1.0, 1.0))
+                self.surfaces[0] = float(np.clip((pwm_thr - 1000.0) / 1000.0, 0.0, 1.0))
+                self.surfaces[3] = float(np.clip((pwm_rud - 1500.0) / 500.0, -1.0, 1.0))
             elif mtype == "SYS_STATUS":
                 if getattr(msg, "battery_remaining", -1) >= 0:
                     self.battery = float(msg.battery_remaining) / 100.0
@@ -167,19 +201,27 @@ class MavlinkHardwareInterface:
             rotation_matrix=lambda: R,
         )
 
-    def send_fixed_wing_attitude(self, roll_des, pitch_des, yaw_des, thrust_n):
+    def send_fixed_wing_attitude(self, roll_des, pitch_des, yaw_des, thrust_n, rate_des=None):
         throttle = float(np.clip(thrust_n / max(float(C.MAX_THRUST), 1e-3), 0.0, 1.0))
         q = euler_to_quat_ned(roll_des, pitch_des, yaw_des)
         self.surfaces[0] = throttle
+        if rate_des is not None:
+            p_ned = float(rate_des[0])
+            q_ned = -float(rate_des[1])
+            r_ned = -float(rate_des[2])
+            mask = 0
+        else:
+            p_ned, q_ned, r_ned = 0.0, 0.0, 0.0
+            mask = 0b00000111
         self.conn.mav.set_attitude_target_send(
             int(time.monotonic() * 1000) & 0xFFFFFFFF,
             self.conn.target_system,
             self.conn.target_component,
-            0b00000111,
+            mask,
             q,
-            0.0,
-            0.0,
-            0.0,
+            p_ned,
+            q_ned,
+            r_ned,
             throttle,
         )
 
@@ -327,10 +369,20 @@ def run_hardware_mavlink(
                 t0 = now
                 t = 0.0
                 launch_t = 0.0
+                if getattr(C, "AUTO_ARM_ON_LAUNCH", True):
+                    hw.set_flight_mode(getattr(C, "PIXHAWK_MODE", "GUIDED"))
+                    hw.arm_disarm(True)
 
             carrot_target, loiter_center, phase = uav_target_for_state(t, est.pos)
 
-            if waiting_for_launch:
+            if is_kill_requested():
+                if not disarmed:
+                    hw.arm_disarm(False, force=True)
+                disarmed = True
+                thrust_cmd = 0.0
+                phase = "DISARMED (KILL SWITCH)"
+                hw.send_fixed_wing_attitude(0.0, 0.0, est.att[2], 0.0)
+            elif waiting_for_launch:
                 phase = "READY — PRESS START FLIGHT"
                 thrust_cmd = 0.0
                 hw.send_fixed_wing_attitude(0.0, 0.0, est.att[2], 0.0)
@@ -376,6 +428,7 @@ def run_hardware_mavlink(
                         if float(est.pos[2]) <= 0.15 and float(np.linalg.norm(est.vel[:2])) < 0.8:
                             disarmed = True
                             thrust_cmd = 0.0
+                            hw.arm_disarm(False, force=False)
                             phase = f"LANDED AT HOME ({tag})"
                     elif (t - launch_t) < 2.6 and float(est.pos[2]) < (C.HOVER_ALT - 0.10):
                         mode_override = "climb"
@@ -401,7 +454,13 @@ def run_hardware_mavlink(
                             hw.send_fixed_wing_position_target(carrot_target, airspeed_des=C.CRUISE_SPEED)
                         else:
                             roll_des, pitch_des, yaw_des = ctrl.att_des
-                            hw.send_fixed_wing_attitude(roll_des, pitch_des, yaw_des, thrust_cmd)
+                            hw.send_fixed_wing_attitude(
+                                roll_des,
+                                pitch_des,
+                                yaw_des,
+                                thrust_cmd,
+                                rate_des=ctrl.rate_des,
+                            )
 
             phase_key = phase.split("(")[0].strip()
             if phase_key != last_phase:
@@ -437,9 +496,10 @@ def run_hardware_mavlink(
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--sim", action="store_true")
+    mode_grp = ap.add_mutually_exclusive_group(required=True)
+    mode_grp.add_argument("--mavlink", default=None)
+    mode_grp.add_argument("--sim", action="store_true")
     ap.add_argument("--loop", action="store_true")
-    ap.add_argument("--mavlink", default=None)
     ap.add_argument("--baud", type=int, default=921600)
     ap.add_argument("--control-mode", choices=["attitude", "waypoint"], default="attitude")
     ap.add_argument("--speed", type=float, default=1.0)
@@ -457,7 +517,7 @@ def main():
             godot_port=args.port,
             web_port=args.web_port,
         )
-    else:
+    elif args.sim:
         run_sim_dry_run(
             godot_host=args.host,
             godot_port=args.port,

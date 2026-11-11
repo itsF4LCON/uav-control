@@ -20,6 +20,14 @@ SERVO_TAU = 0.02         # how fast flaps react
 MOTOR_TAU = 0.04         # how fast motor spins up
 MOTOR_MAX_THRUST = MAX_THRUST
 
+# pixhawk hardware setup (for pi5_bridge.py)
+PIXHAWK_MODE = "GUIDED"  # mode to switch pixhawk into on launch
+AUTO_ARM_ON_LAUNCH = True
+SERVO_AIL = 1            # aileron channel on pixhawk
+SERVO_ELV = 2            # elevator / v-tail channel
+SERVO_THR = 3            # throttle ESC channel
+SERVO_RUD = 4            # rudder / v-tail channel
+
 # sim timing
 DT = 0.005               # physics step (dont touch)
 DURATION = 90.0          # how long a battery lasts in seconds

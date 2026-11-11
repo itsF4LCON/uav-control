@@ -34,3 +34,14 @@ cd pi
 pip install -r requirements.txt
 python3 pi5_bridge.py --mavlink /dev/ttyAMA0 --baud 921600 --laptop-ip <LAPTOP_IP>
 ```
+
+`--mavlink <device>` or `--sim` is required. On `START FLIGHT` the Pi sets the Pixhawk mode (`PIXHAWK_MODE`) and arms it (`AUTO_ARM_ON_LAUNCH`). The `KILL` button force-disarms. Always keep the RC transmitter override ready.
+
+Servo channels are set in `pi/config.py` (`SERVO_AIL`, `SERVO_ELV`, `SERVO_THR`, `SERVO_RUD`) so match them to your wiring. The Pi sends attitude, body rates, and throttle to the autopilot.
+
+### Tests
+
+```bash
+cd laptop/sim
+.venv/bin/python test_flight.py
+```

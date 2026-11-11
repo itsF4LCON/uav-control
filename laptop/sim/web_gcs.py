@@ -11,6 +11,7 @@ from drone.flight import (
     clear_selected_point,
     request_launch,
     request_land,
+    request_kill,
 )
 
 _STATE_LOCK = threading.Lock()
@@ -278,9 +279,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
   <aside class="sidebar">
     <div class="section">
-      <div class="btn-row">
-        <button class="launch-btn" onclick="startFlight()">START FLIGHT (THROW)</button>
+      <div class="btn-grid-3">
+        <button class="launch-btn" onclick="startFlight()">START FLIGHT</button>
         <button onclick="landFlight()">LAND NOW</button>
+        <button onclick="killFlight()">KILL</button>
       </div>
 
       <div class="btn-row">
@@ -616,6 +618,14 @@ HTML_PAGE = r"""<!DOCTYPE html>
     });
   }
 
+  async function killFlight() {
+    await fetch('/api/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cmd: 'kill' })
+    });
+  }
+
   const pfdCanvas = document.getElementById('pfdCanvas');
   const pfd = pfdCanvas.getContext('2d');
 
@@ -820,6 +830,9 @@ class _GCSRequestHandler(BaseHTTPRequestHandler):
             elif cmd == "land":
                 request_land()
                 print("  [Web GCS Land] Auto-landing triggered!")
+            elif cmd == "kill":
+                request_kill()
+                print("  [Web GCS Kill] Emergency disarm triggered!")
 
             resp = json.dumps({"ok": True}).encode("utf-8")
             self.send_response(200)

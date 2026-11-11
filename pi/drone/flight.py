@@ -8,12 +8,14 @@ _INTERACTIVE_RADIUS = None
 _INTERACTIVE_MODE = "loiter"
 _LAUNCH_REQUESTED = False
 _LAND_REQUESTED = False
+_KILL_REQUESTED = False
 
 
 def request_launch():
-    global _LAUNCH_REQUESTED, _LAND_REQUESTED
+    global _LAUNCH_REQUESTED, _LAND_REQUESTED, _KILL_REQUESTED
     _LAUNCH_REQUESTED = True
     _LAND_REQUESTED = False
+    _KILL_REQUESTED = False
 
 
 def request_land():
@@ -21,9 +23,16 @@ def request_land():
     _LAND_REQUESTED = True
 
 
+def request_kill():
+    global _KILL_REQUESTED, _LAUNCH_REQUESTED
+    _KILL_REQUESTED = True
+    _LAUNCH_REQUESTED = False
+
+
 def clear_land_request():
-    global _LAND_REQUESTED
+    global _LAND_REQUESTED, _KILL_REQUESTED
     _LAND_REQUESTED = False
+    _KILL_REQUESTED = False
 
 
 def consume_launch_request():
@@ -36,6 +45,10 @@ def consume_launch_request():
 
 def is_land_requested():
     return _LAND_REQUESTED
+
+
+def is_kill_requested():
+    return _KILL_REQUESTED
 
 
 def set_selected_point(x, y, z=None, radius=None, mode="loiter"):

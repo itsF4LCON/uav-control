@@ -12,6 +12,7 @@ from drone.flight import (
     mission_duration,
     consume_launch_request,
     is_land_requested,
+    is_kill_requested,
     clear_land_request,
 )
 
@@ -71,6 +72,16 @@ class World:
     def step(self, dt=C.DT):
         if consume_launch_request():
             self.launch()
+
+        if is_kill_requested():
+            self.disarmed = True
+            self.thrust_cmd = 0.0
+            self.quad.vel[:] = 0.0
+            self.quad.rate[:] = 0.0
+            self.quad.airspeed = 0.0
+            self.quad.surfaces[:] = 0.0
+            self.phase = "DISARMED (KILL SWITCH)"
+            return False, -1
 
         self.loiter_radius = get_loiter_radius()
 

@@ -32,6 +32,7 @@ class FlightController:
         self.loiter_center = np.array([0.0, 0.0, float(C.HOVER_ALT)])
         self.loiter_radius = float(C.CIRCLE_RADIUS)
         self.att_des = np.zeros(3)
+        self.rate_des = np.zeros(3)
         self._rate_filt = np.zeros(3)
         self._vel_filt = None
         self._roll_cmd_smooth = None
@@ -42,6 +43,7 @@ class FlightController:
         self.speed_pid.reset()
         self.x_pid.reset()
         self.y_pid.reset()
+        self.rate_des = np.zeros(3)
         self._rate_filt = np.zeros(3)
         self._vel_filt = None
         self._roll_cmd_smooth = None
@@ -192,6 +194,7 @@ class FlightController:
         p_des = phi_d - sp * psi_d
         q_des = cr * th_d + cp * sr * psi_d
         r_des = -sr * th_d + cp * cr * psi_d
+        self.rate_des = np.array([p_des, q_des, r_des], dtype=float)
 
         kp_r = 18.0
         g_comp = np.cross(self._rate_filt, uav.inertia * self._rate_filt)
