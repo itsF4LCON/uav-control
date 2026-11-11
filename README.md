@@ -2,6 +2,11 @@
 
 Fixed-wing UAV (miniature MQ-9 Reaper) flight control, simulator, OpenStreetMap/Satellite Web Ground Control Station, and Raspberry Pi 5 + Pixhawk MAVLink companion stack.
 
+![Godot 3D Flight Demo](docs/demo.gif)
+
+> **Demo Flight:** Hand-launch climb $\rightarrow$ Navigate to Point 1 `(7, 5)` $\rightarrow$ Navigate to Point 2 `(-6, -4)` $\rightarrow$ Precision Return-to-Home glide landing.  
+> *Full MP4 video available at [docs/demo.mp4](docs/demo.mp4).*
+
 ## Folder Structure
 
 - `laptop/`
@@ -22,7 +27,7 @@ python3 -m venv .venv
 ```
 
 - Open **`http://127.0.0.1:8080`** in your browser for the live OpenStreetMap / Satellite Ground Control Station.
-- Click **`SET HOME`** (or **`MY GPS`**) to pin `(0, 0)` on the field, click **`START FLIGHT (THROW)`** when launching, click anywhere on the map to command a `LOITER` or `FLY TO` point, and click **`LAND NOW`** to return home and land.
+- Click **`SET HOME`** (or **`MY GPS`**) to pin `(0, 0)` on the field, click **`START FLIGHT`** when launching, click anywhere on the map to command a `LOITER` or `FLY TO` point, and click **`LAND NOW`** to return home and land (or **`KILL`** to emergency disarm).
 - Optional 3D view: open `laptop/godot/project.godot` in Godot 4 and press **F5**.
 
 ### 2. Raspberry Pi 5 (Real Flight with Pixhawk)

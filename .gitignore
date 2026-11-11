@@ -3,4 +3,5 @@ __pycache__/
 .venv/
 .godot/
 *.mp4
+!docs/*.mp4
 .DS_Store

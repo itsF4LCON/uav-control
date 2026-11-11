@@ -61,6 +61,9 @@ var cam_dist := 10.0
 var cam_focus := Vector3(0, 1.5, 0)
 var chase_heading := Vector3(1, 0, 0)
 var shake := 0.0
+var replay: Array = []
+var replay_t := 0.0
+var replay_idx := -1
 
 
 static func s2g(v) -> Vector3:
@@ -105,6 +108,26 @@ func _ready() -> void:
 	receiver.port = UDP_PORT
 	receiver.state_received.connect(_on_state)
 	add_child(receiver)
+
+	for a in OS.get_cmdline_user_args():
+		if a.begins_with("--replay="):
+			_load_replay(a.substr(9))
+
+
+func _load_replay(path: String) -> void:
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		return
+	while not f.eof_reached():
+		var line := f.get_line()
+		if line.length() > 2:
+			var d = JSON.parse_string(line)
+			if d is Dictionary:
+				replay.append(d)
+	cam_mode = CamMode.FOLLOW
+	cam_dist = 6.5
+	cam_pitch = deg_to_rad(18.0)
+	hud_label.add_theme_font_size_override("font_size", 11)
 
 
 func _build_environment() -> void:
@@ -461,6 +484,13 @@ func _spawn_burst(at: Vector3) -> void:
 
 
 func _process(delta: float) -> void:
+	if replay.size() > 0:
+		replay_t += delta
+		var idx := mini(int(replay_t * 50.0), replay.size() - 1)
+		if idx != replay_idx:
+			replay_idx = idx
+			_on_state(replay[idx])
+		cam_yaw += delta * 0.10
 	if has_state:
 		var a := 1.0 - exp(-delta * SMOOTH)
 		drone.position = drone.position.lerp(goal_pos, a)
