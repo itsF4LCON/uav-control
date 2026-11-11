@@ -7,20 +7,32 @@ import numpy as np
 
 import config as C
 from drone import FlightController, World
-from drone.flight import uav_target_for_state, get_loiter_radius
+from drone.flight import (
+    uav_target_for_state,
+    get_loiter_radius,
+    consume_launch_request,
+    is_land_requested,
+    clear_land_request,
+)
 from godot_bridge import GodotBridge
 
 
+def _wrap_pi(a):
+    return (float(a) + math.pi) % (2.0 * math.pi) - math.pi
+
+
 def ned_to_sim_vec(north, east, down):
-    return np.array([float(north), -float(east), -float(down)], dtype=float)
+    return np.array([float(east), float(north), -float(down)], dtype=float)
 
 
-def sim_to_ned_vec(x, y, z):
-    return float(x), -float(y), -float(z)
+def sim_to_ned_vec(x_east, y_north, z_up):
+    return float(y_north), float(x_east), -float(z_up)
 
 
-def euler_to_quat_ned(roll, pitch, yaw):
-    r, p, y = float(roll), -float(pitch), -float(yaw)
+def euler_to_quat_ned(roll_sim, pitch_sim, yaw_sim):
+    r = float(roll_sim)
+    p = -float(pitch_sim)
+    y = _wrap_pi(0.5 * math.pi - float(yaw_sim))
     cr, sr = math.cos(r * 0.5), math.sin(r * 0.5)
     cp, sp = math.cos(p * 0.5), math.sin(p * 0.5)
     cy, sy = math.cos(y * 0.5), math.sin(y * 0.5)
@@ -66,12 +78,15 @@ class MavlinkHardwareInterface:
             pass
 
         self.pos = np.zeros(3)
-        self.vel = np.array([float(C.CRUISE_SPEED), 0.0, 0.0])
+        self.vel = np.zeros(3)
         self.att = np.zeros(3)
         self.rate = np.zeros(3)
-        self.airspeed = float(C.CRUISE_SPEED)
+        self.airspeed = 0.0
         self.battery = 1.0
-        self.surfaces = [0.5, 0.0, 0.0, 0.0]
+        self.surfaces = [0.0, 0.0, 0.0, 0.0]
+        self._home_lat_lon_alt = None
+
+    def reset_home_here(self):
         self._home_lat_lon_alt = None
 
     def poll_state(self):
@@ -91,7 +106,7 @@ class MavlinkHardwareInterface:
                 break
             mtype = msg.get_type()
 
-            if mtype == "LOCAL_POSITION_NED":
+            if mtype == "LOCAL_POSITION_NED" and self._home_lat_lon_alt is None:
                 self.pos = ned_to_sim_vec(msg.x, msg.y, msg.z)
                 self.vel = ned_to_sim_vec(msg.vx, msg.vy, msg.vz)
             elif mtype == "GLOBAL_POSITION_INT":
@@ -101,17 +116,18 @@ class MavlinkHardwareInterface:
                 if self._home_lat_lon_alt is None and (lat != 0.0 or lon != 0.0):
                     self._home_lat_lon_alt = (lat, lon, alt)
                 if self._home_lat_lon_alt is not None:
-                    lat0, lon0, _ = self._home_lat_lon_alt
+                    lat0, lon0, alt0 = self._home_lat_lon_alt
                     north_m = math.radians(lat - lat0) * 6378137.0
                     east_m = math.radians(lon - lon0) * 6378137.0 * math.cos(math.radians(lat0))
-                    self.pos = np.array([north_m, -east_m, alt], dtype=float)
+                    self.pos = np.array([east_m, north_m, alt - alt0], dtype=float)
                     self.vel = ned_to_sim_vec(msg.vx * 0.01, msg.vy * 0.01, msg.vz * 0.01)
             elif mtype == "ATTITUDE":
-                self.att = np.array([msg.roll, -msg.pitch, -msg.yaw], dtype=float)
-                self.rate = np.array([msg.rollspeed, -msg.pitchspeed, -msg.yawspeed], dtype=float)
+                yaw_sim = _wrap_pi(0.5 * math.pi - float(msg.yaw))
+                self.att = np.array([float(msg.roll), -float(msg.pitch), yaw_sim], dtype=float)
+                self.rate = np.array([float(msg.rollspeed), -float(msg.pitchspeed), -float(msg.yawspeed)], dtype=float)
             elif mtype == "VFR_HUD":
                 va = float(msg.airspeed) if msg.airspeed > 0.2 else float(msg.groundspeed)
-                self.airspeed = max(va, 0.5)
+                self.airspeed = max(va, 0.0)
                 self.surfaces[0] = float(np.clip(msg.throttle / 100.0, 0.0, 1.0))
             elif mtype == "SERVO_OUTPUT_RAW":
                 self.surfaces[1] = float(np.clip((msg.servo1_raw - 1500.0) / 500.0, -1.0, 1.0))
@@ -283,6 +299,10 @@ def run_hardware_mavlink(
 
     t0 = time.perf_counter()
     prev_t = t0
+    launch_t = 0.0
+    waiting_for_launch = True
+    disarmed = False
+    in_flare = False
     last_phase = None
 
     try:
@@ -294,9 +314,94 @@ def run_hardware_mavlink(
 
             est = hw.poll_state()
             est.pos = est.pos - origin
-
             r_loiter = get_loiter_radius()
+
+            if consume_launch_request():
+                clear_land_request()
+                waiting_for_launch = False
+                disarmed = False
+                in_flare = False
+                ctrl.reset()
+                origin = hw.pos.copy()
+                est.pos = np.zeros(3)
+                t0 = now
+                t = 0.0
+                launch_t = 0.0
+
             carrot_target, loiter_center, phase = uav_target_for_state(t, est.pos)
+
+            if waiting_for_launch:
+                phase = "READY — PRESS START FLIGHT"
+                thrust_cmd = 0.0
+                hw.send_fixed_wing_attitude(0.0, 0.0, est.att[2], 0.0)
+            else:
+                low_batt = est.battery <= float(getattr(C, "LOW_BATTERY_THRESHOLD", 0.20))
+                landing = low_batt or is_land_requested()
+                mode_override = None
+
+                if disarmed:
+                    thrust_cmd = 0.0
+                    phase = "LANDED (LOW BATT)" if low_batt else "LANDED — PRESS START FLIGHT"
+                    hw.send_fixed_wing_attitude(0.0, 0.0, est.att[2], 0.0)
+                else:
+                    if landing:
+                        tag = "LOW BATT" if low_batt else "MANUAL"
+                        dist_home = math.hypot(float(est.pos[0]), float(est.pos[1]))
+                        if not in_flare and dist_home > 10.0:
+                            mode_override = "rtl_cruise"
+                            loiter_center = np.array([0.0, 0.0, float(C.HOVER_ALT)], dtype=float)
+                            carrot_target = loiter_center.copy()
+                            phase = f"RTL TO HOME ({dist_home:.1f}m)"
+                        elif not in_flare and float(est.pos[2]) > 0.75 and dist_home < 6.0:
+                            r_loiter = 3.2
+                            z_g = max(0.45, float(est.pos[2]) - 0.55)
+                            dx, dy = float(est.pos[0]), float(est.pos[1])
+                            gamma = math.atan2(dy, dx) if dist_home > 1e-3 else 0.0
+                            lead = gamma + 0.65
+                            loiter_center = np.array([0.0, 0.0, z_g], dtype=float)
+                            carrot_target = np.array([
+                                r_loiter * math.cos(lead),
+                                r_loiter * math.sin(lead),
+                                z_g,
+                            ], dtype=float)
+                            phase = f"DESCENDING AT HOME (z={est.pos[2]:.1f}m)"
+                        else:
+                            in_flare = True
+                            mode_override = "flare_land"
+                            z_g = float(np.clip((dist_home - 1.2) / 9.0 * float(C.HOVER_ALT), 0.0, float(C.HOVER_ALT)))
+                            loiter_center = np.array([0.0, 0.0, 0.0], dtype=float)
+                            carrot_target = np.array([0.0, 0.0, z_g], dtype=float)
+                            phase = f"LANDING AT HOME ({tag})"
+
+                        if float(est.pos[2]) <= 0.15 and float(np.linalg.norm(est.vel[:2])) < 0.8:
+                            disarmed = True
+                            thrust_cmd = 0.0
+                            phase = f"LANDED AT HOME ({tag})"
+                    elif (t - launch_t) < 2.6 and float(est.pos[2]) < (C.HOVER_ALT - 0.10):
+                        mode_override = "climb"
+                        yaw_c = float(est.att[2])
+                        carrot_target = np.array([
+                            float(est.pos[0]) + 8.0 * math.cos(yaw_c),
+                            float(est.pos[1]) + 8.0 * math.sin(yaw_c),
+                            float(C.HOVER_ALT),
+                        ])
+                        phase = "HAND-LAUNCH CLIMB"
+
+                    if not disarmed:
+                        thrust_cmd, _ = ctrl.update(
+                            est,
+                            carrot_target,
+                            step_dt,
+                            obstacles=[],
+                            loiter_center=loiter_center,
+                            loiter_radius=r_loiter,
+                            flight_mode_override=mode_override,
+                        )
+                        if control_mode == "waypoint":
+                            hw.send_fixed_wing_position_target(carrot_target, airspeed_des=C.CRUISE_SPEED)
+                        else:
+                            roll_des, pitch_des, yaw_des = ctrl.att_des
+                            hw.send_fixed_wing_attitude(roll_des, pitch_des, yaw_des, thrust_cmd)
 
             phase_key = phase.split("(")[0].strip()
             if phase_key != last_phase:
@@ -306,21 +411,6 @@ def run_hardware_mavlink(
                     f"| pos=({est.pos[0]:+5.1f}, {est.pos[1]:+5.1f}, {est.pos[2]:5.1f}) m "
                     f"| Va={est.airspeed:4.1f} m/s"
                 )
-
-            thrust_cmd, _ = ctrl.update(
-                est,
-                carrot_target,
-                step_dt,
-                obstacles=[],
-                loiter_center=loiter_center,
-                loiter_radius=r_loiter,
-            )
-
-            if control_mode == "waypoint":
-                hw.send_fixed_wing_position_target(carrot_target, airspeed_des=C.CRUISE_SPEED)
-            else:
-                roll_des, pitch_des, yaw_des = ctrl.att_des
-                hw.send_fixed_wing_attitude(roll_des, pitch_des, yaw_des, thrust_cmd)
 
             hw_world = SimpleNamespace(
                 t=t,
@@ -332,7 +422,7 @@ def run_hardware_mavlink(
                 thrust_cmd=thrust_cmd,
                 wind=SimpleNamespace(value=np.zeros(3)),
                 phase=phase,
-                disarmed=False,
+                disarmed=disarmed,
             )
             bridge.send(hw_world, False, -1)
 
@@ -353,7 +443,7 @@ def main():
     ap.add_argument("--baud", type=int, default=921600)
     ap.add_argument("--control-mode", choices=["attitude", "waypoint"], default="attitude")
     ap.add_argument("--speed", type=float, default=1.0)
-    ap.add_argument("--host", default=None)
+    ap.add_argument("--host", "--laptop-ip", dest="host", default=None)
     ap.add_argument("--port", type=int, default=None)
     ap.add_argument("--web-port", type=int, default=8080)
     args = ap.parse_args()
